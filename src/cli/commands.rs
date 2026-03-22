@@ -149,6 +149,45 @@ fn run_chat(model_override: Option<String>, session_override: Option<String>) {
         println!("{}", "Type your message. Use /new, /status, /help, or 'exit' to quit.".dimmed());
         println!();
 
+        // Spawn a background task that processes bus messages produced by subagents.
+        // Subagents announce their results by publishing an InboundMessage; the
+        // background loop runs them through the agent and prints the response.
+        let agent_bg = Arc::clone(&agent);
+        let bus_bg = Arc::clone(&bus);
+        tokio::spawn(async move {
+            loop {
+                // Poll with a short timeout so the task exits if the bus is dropped.
+                let maybe_msg = tokio::time::timeout(
+                    tokio::time::Duration::from_millis(200),
+                    bus_bg.consume_inbound(),
+                )
+                .await;
+
+                let msg = match maybe_msg {
+                    Ok(Some(m)) => m,
+                    Ok(None) => break, // channel closed
+                    Err(_) => continue, // timeout — loop again
+                };
+
+                // Only process messages coming from the subagent system.
+                // Interactive user messages are handled by process_direct below.
+                if msg.sender_id != "subagent" {
+                    continue;
+                }
+
+                if let Some(response) = agent_bg.process_message(&msg, None).await {
+                    println!();
+                    println!(
+                        "{}",
+                        format!("ombudsman: {}", response.content).bold()
+                    );
+                    println!();
+                    print!("{} ", "You:".bold().green());
+                    io::stdout().flush().ok();
+                }
+            }
+        });
+
         // Set up readline editor
         let history_path = get_data_dir().join("history.txt");
         let mut rl = DefaultEditor::new().expect("Failed to create readline editor");

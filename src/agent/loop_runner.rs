@@ -2,10 +2,13 @@
 
 use crate::agent::context::ContextBuilder;
 use crate::agent::memory::MemoryConsolidator;
+use crate::agent::subagent::SubagentManager;
 use crate::agent::tools::filesystem::{EditFileTool, ListDirTool, ReadFileTool, WriteFileTool};
 use crate::agent::tools::mcp::{McpSession, connect_mcp_servers};
+use crate::agent::tools::message::{MessageTool, MessageToolContext};
 use crate::agent::tools::registry::ToolRegistry;
 use crate::agent::tools::shell::ExecTool;
+use crate::agent::tools::spawn::{SpawnTool, SpawnToolContext};
 use crate::agent::tools::web::{WebFetchTool, WebSearchTool};
 use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
 use crate::config::schema::{ChannelsConfig, ExecToolConfig, McpServerConfig, WebSearchConfig};
@@ -16,7 +19,7 @@ use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -47,6 +50,12 @@ pub struct AgentLoop {
     mcp_sessions: Mutex<Vec<McpSession>>,
     /// Whether MCP connection has been attempted.
     mcp_connected: Mutex<bool>,
+    /// Subagent manager for background task execution.
+    subagent_manager: Arc<SubagentManager>,
+    /// Shared context for SpawnTool (channel/chat_id updated per message).
+    spawn_ctx: Arc<StdMutex<SpawnToolContext>>,
+    /// Shared context for MessageTool (channel/chat_id updated per message).
+    message_ctx: Arc<StdMutex<MessageToolContext>>,
 }
 
 impl AgentLoop {
@@ -111,7 +120,28 @@ impl AgentLoop {
             web_proxy.clone(),
         )));
 
-        base_tools.register(Box::new(WebFetchTool::new(50_000, web_proxy)));
+        base_tools.register(Box::new(WebFetchTool::new(50_000, web_proxy.clone())));
+
+        // Build SubagentManager and register SpawnTool + MessageTool
+        let subagent_manager = Arc::new(SubagentManager::new(
+            Arc::clone(&provider),
+            workspace,
+            Arc::clone(&bus),
+            model.clone(),
+            web_search_config.clone(),
+            web_proxy.clone(),
+            exec_config.clone(),
+            restrict_to_workspace,
+        ));
+
+        let spawn_ctx = Arc::new(StdMutex::new(SpawnToolContext::default()));
+        let message_ctx = Arc::new(StdMutex::new(MessageToolContext::default()));
+
+        let spawn_tool = SpawnTool::new(Arc::clone(&subagent_manager), Arc::clone(&spawn_ctx));
+        base_tools.register(Box::new(spawn_tool));
+
+        let message_tool = MessageTool::new(bus.outbound_sender(), Arc::clone(&message_ctx));
+        base_tools.register(Box::new(message_tool));
 
         Ok(Self {
             bus,
@@ -132,6 +162,9 @@ impl AgentLoop {
             mcp_servers,
             mcp_sessions: Mutex::new(Vec::new()),
             mcp_connected: Mutex::new(false),
+            subagent_manager,
+            spawn_ctx,
+            message_ctx,
         })
     }
 
@@ -477,6 +510,19 @@ impl AgentLoop {
 
         // Lazily connect to MCP servers on first message
         self.connect_mcp().await;
+
+        // Update per-message context for SpawnTool and MessageTool
+        {
+            let mut spawn_ctx = self.spawn_ctx.lock().unwrap();
+            spawn_ctx.channel = msg.channel.clone();
+            spawn_ctx.chat_id = msg.chat_id.clone();
+            spawn_ctx.session_key = session_key.clone();
+        }
+        {
+            let mut msg_ctx = self.message_ctx.lock().unwrap();
+            msg_ctx.channel = msg.channel.clone();
+            msg_ctx.chat_id = msg.chat_id.clone();
+        }
 
         // Consolidate memory if needed
         {
