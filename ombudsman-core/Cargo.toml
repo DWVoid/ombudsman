@@ -1,0 +1,59 @@
+[package]
+name = "ombudsman-core"
+version.workspace = true
+edition.workspace = true
+description = "Core library for ombudsman — agent, bus, config, providers, session"
+license = "MIT"
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+rmp-serde = { workspace = true }
+# HTTP client
+reqwest = { workspace = true }
+# Logging
+tracing = { workspace = true }
+# Async traits
+async-trait = { workspace = true }
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+# Directories
+dirs = { workspace = true }
+# Date/time
+chrono = { workspace = true }
+# Random IDs
+rand = { workspace = true }
+# Base64
+base64 = { workspace = true }
+# Regex
+regex = { workspace = true }
+# Futures utilities
+futures = { workspace = true }
+# UUID
+uuid = { workspace = true }
+# HTML parsing
+scraper = { workspace = true }
+# URL parsing
+url = { workspace = true }
+# MIME type detection
+mime_guess = { workspace = true }
+# Once cell
+once_cell = { workspace = true }
+html-escape = { workspace = true }
+urlencoding = { workspace = true }
+# MCP client
+rmcp = { workspace = true }
+# HTTP types
+http = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
+
+[lib]
+name = "ombudsman_core"
+path = "src/lib.rs"
