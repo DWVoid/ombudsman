@@ -287,6 +287,16 @@ impl Tool for WebSearchTool {
         })
     }
 
+    fn clone_box(&self) -> Box<dyn Tool> {
+        Box::new(WebSearchTool {
+            provider: self.provider.clone(),
+            api_key: self.api_key.clone(),
+            base_url: self.base_url.clone(),
+            max_results: self.max_results,
+            proxy: self.proxy.clone(),
+        })
+    }
+
     async fn execute(&self, args: &HashMap<String, Value>) -> String {
         let query = match args.get("query").and_then(|v| v.as_str()) {
             Some(q) => q.to_string(),
@@ -395,6 +405,13 @@ impl Tool for WebFetchTool {
                 "maxChars": {"type": "integer", "minimum": 100}
             },
             "required": ["url"]
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn Tool> {
+        Box::new(WebFetchTool {
+            max_chars: self.max_chars,
+            proxy: self.proxy.clone(),
         })
     }
 

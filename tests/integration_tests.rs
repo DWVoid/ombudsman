@@ -380,3 +380,201 @@ mod context_tests {
         assert_eq!(messages[0]["content"], "I will help you.");
     }
 }
+
+// ---- MCP tool tests ----
+
+mod mcp_tests {
+    use ombudsman::agent::normalize_schema_for_openai;
+    use serde_json::{json, Value};
+
+    // --- Schema normalization tests (functionally equivalent to nanobot Python test suite) ---
+
+    #[test]
+    fn test_normalize_non_nullable_anyof_untouched() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "value": {
+                    "anyOf": [{"type": "string"}, {"type": "integer"}]
+                }
+            },
+            "required": []
+        });
+        let result = normalize_schema_for_openai(schema);
+        // non-nullable anyOf is left alone
+        assert_eq!(
+            result["properties"]["value"]["anyOf"],
+            json!([{"type": "string"}, {"type": "integer"}])
+        );
+    }
+
+    #[test]
+    fn test_normalize_type_array_nullable() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": ["string", "null"]}
+            },
+            "required": []
+        });
+        let result = normalize_schema_for_openai(schema);
+        assert_eq!(result["properties"]["name"]["type"], json!("string"));
+        assert_eq!(result["properties"]["name"]["nullable"], json!(true));
+    }
+
+    #[test]
+    fn test_normalize_anyof_nullable_property() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "description": "optional name"
+                }
+            },
+            "required": []
+        });
+        let result = normalize_schema_for_openai(schema);
+        let prop = &result["properties"]["name"];
+        assert_eq!(prop["type"], json!("string"));
+        assert_eq!(prop["description"], json!("optional name"));
+        assert_eq!(prop["nullable"], json!(true));
+        // anyOf should be removed after normalization
+        assert!(prop.get("anyOf").is_none());
+    }
+
+    #[test]
+    fn test_normalize_oneof_nullable_property() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "count": {
+                    "oneOf": [{"type": "integer"}, {"type": "null"}]
+                }
+            },
+            "required": []
+        });
+        let result = normalize_schema_for_openai(schema);
+        let prop = &result["properties"]["count"];
+        assert_eq!(prop["type"], json!("integer"));
+        assert_eq!(prop["nullable"], json!(true));
+        assert!(prop.get("oneOf").is_none());
+    }
+
+    #[test]
+    fn test_normalize_non_object_schema_passthrough() {
+        let schema = json!({"type": "string"});
+        let result = normalize_schema_for_openai(schema.clone());
+        assert_eq!(result, schema);
+    }
+
+    #[test]
+    fn test_normalize_object_gets_defaults() {
+        let schema = json!({"type": "object"});
+        let result = normalize_schema_for_openai(schema);
+        // An empty object schema gets default properties and required
+        assert!(result["properties"].is_object());
+        assert!(result["required"].is_array());
+    }
+
+    #[test]
+    fn test_normalize_nested_items() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "tags": {
+                    "type": "array",
+                    "items": {"type": ["string", "null"]}
+                }
+            },
+            "required": []
+        });
+        let result = normalize_schema_for_openai(schema);
+        let items = &result["properties"]["tags"]["items"];
+        assert_eq!(items["type"], json!("string"));
+        assert_eq!(items["nullable"], json!(true));
+    }
+
+    #[test]
+    fn test_normalize_non_exhaustive_anyof_left_alone() {
+        // anyOf with two non-null types should not be normalized
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "value": {
+                    "anyOf": [{"type": "string"}, {"type": "boolean"}]
+                }
+            },
+            "required": []
+        });
+        let result = normalize_schema_for_openai(schema);
+        let prop = &result["properties"]["value"];
+        // anyOf should be preserved since there's no null branch
+        assert_eq!(
+            prop["anyOf"],
+            json!([{"type": "string"}, {"type": "boolean"}])
+        );
+        assert!(prop.get("nullable").is_none());
+    }
+
+    #[test]
+    fn test_config_mcp_server_defaults() {
+        use ombudsman::config::schema::McpServerConfig;
+        let cfg = McpServerConfig::default();
+        assert_eq!(cfg.enabled_tools, vec!["*"]);
+        assert_eq!(cfg.tool_timeout, 30);
+        assert!(cfg.url.is_empty());
+        assert!(cfg.headers.is_empty());
+    }
+
+    #[test]
+    fn test_config_mcp_server_deserialization() {
+        use ombudsman::config::schema::{McpServerConfig, McpTransportType};
+        let json = r#"{
+            "url": "https://example.com/mcp",
+            "type": "streamableHttp",
+            "toolTimeout": 60,
+            "enabledTools": ["search", "lookup"],
+            "headers": {"Authorization": "Bearer token123"}
+        }"#;
+        let cfg: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.url, "https://example.com/mcp");
+        assert_eq!(cfg.transport_type, Some(McpTransportType::StreamableHttp));
+        assert_eq!(cfg.tool_timeout, 60);
+        assert_eq!(cfg.enabled_tools, vec!["search", "lookup"]);
+        assert_eq!(cfg.headers.get("Authorization").unwrap(), "Bearer token123");
+    }
+
+    #[test]
+    fn test_config_mcp_server_sse_type() {
+        use ombudsman::config::schema::{McpServerConfig, McpTransportType};
+        let json = r#"{"url": "http://localhost:8080/sse", "type": "sse"}"#;
+        let cfg: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.transport_type, Some(McpTransportType::Sse));
+    }
+
+    #[test]
+    fn test_tools_config_mcp_servers_empty_by_default() {
+        use ombudsman::config::schema::ToolsConfig;
+        let cfg = ToolsConfig::default();
+        assert!(cfg.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn test_tools_config_with_mcp_servers() {
+        use ombudsman::config::schema::ToolsConfig;
+        let json = r#"{
+            "mcpServers": {
+                "myserver": {
+                    "url": "http://localhost:3000/mcp",
+                    "enabledTools": ["*"]
+                }
+            }
+        }"#;
+        let cfg: ToolsConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.mcp_servers.len(), 1);
+        let server = cfg.mcp_servers.get("myserver").unwrap();
+        assert_eq!(server.url, "http://localhost:3000/mcp");
+        assert_eq!(server.enabled_tools, vec!["*"]);
+    }
+}

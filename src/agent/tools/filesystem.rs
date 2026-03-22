@@ -87,6 +87,13 @@ impl Tool for ReadFileTool {
         })
     }
 
+    fn clone_box(&self) -> Box<dyn Tool> {
+        Box::new(ReadFileTool {
+            workspace: self.workspace.clone(),
+            allowed_dir: self.allowed_dir.clone(),
+        })
+    }
+
     async fn execute(&self, args: &HashMap<String, Value>) -> String {
         let path = match args.get("path").and_then(|v| v.as_str()) {
             Some(p) => p,
@@ -198,6 +205,13 @@ impl Tool for WriteFileTool {
         })
     }
 
+    fn clone_box(&self) -> Box<dyn Tool> {
+        Box::new(WriteFileTool {
+            workspace: self.workspace.clone(),
+            allowed_dir: self.allowed_dir.clone(),
+        })
+    }
+
     async fn execute(&self, args: &HashMap<String, Value>) -> String {
         let path = match args.get("path").and_then(|v| v.as_str()) {
             Some(p) => p,
@@ -289,6 +303,13 @@ impl Tool for EditFileTool {
                 "replace_all": {"type": "boolean", "description": "Replace all occurrences (default false)"}
             },
             "required": ["path", "old_text", "new_text"]
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn Tool> {
+        Box::new(EditFileTool {
+            workspace: self.workspace.clone(),
+            allowed_dir: self.allowed_dir.clone(),
         })
     }
 
@@ -401,6 +422,13 @@ impl Tool for ListDirTool {
                 "max_entries": {"type": "integer", "description": "Maximum entries to return (default 200)", "minimum": 1}
             },
             "required": ["path"]
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn Tool> {
+        Box::new(ListDirTool {
+            workspace: self.workspace.clone(),
+            allowed_dir: self.allowed_dir.clone(),
         })
     }
 

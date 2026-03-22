@@ -7,3 +7,4 @@ pub mod skills;
 pub mod tools;
 
 pub use loop_runner::AgentLoop;
+pub use tools::mcp::{McpSession, McpToolWrapper, connect_mcp_servers, normalize_schema_for_openai};

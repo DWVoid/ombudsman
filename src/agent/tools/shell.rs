@@ -98,6 +98,16 @@ impl Tool for ExecTool {
         })
     }
 
+    fn clone_box(&self) -> Box<dyn Tool> {
+        Box::new(ExecTool {
+            timeout_secs: self.timeout_secs,
+            working_dir: self.working_dir.clone(),
+            restrict_to_workspace: self.restrict_to_workspace,
+            path_append: self.path_append.clone(),
+            deny_patterns: self.deny_patterns.iter().map(|r| Regex::new(r.as_str()).unwrap()).collect(),
+        })
+    }
+
     async fn execute(&self, args: &HashMap<String, Value>) -> String {
         let command = match args.get("command").and_then(|v| v.as_str()) {
             Some(c) => c.to_string(),

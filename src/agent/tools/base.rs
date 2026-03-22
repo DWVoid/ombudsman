@@ -25,4 +25,13 @@ pub trait Tool: Send + Sync {
             }
         })
     }
+
+    /// Clone this tool as a boxed trait object.
+    fn clone_box(&self) -> Box<dyn Tool>;
+}
+
+impl Clone for Box<dyn Tool> {
+    fn clone(&self) -> Box<dyn Tool> {
+        self.clone_box()
+    }
 }

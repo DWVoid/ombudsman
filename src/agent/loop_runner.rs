@@ -3,11 +3,12 @@
 use crate::agent::context::ContextBuilder;
 use crate::agent::memory::MemoryConsolidator;
 use crate::agent::tools::filesystem::{EditFileTool, ListDirTool, ReadFileTool, WriteFileTool};
+use crate::agent::tools::mcp::{McpSession, connect_mcp_servers};
 use crate::agent::tools::registry::ToolRegistry;
 use crate::agent::tools::shell::ExecTool;
 use crate::agent::tools::web::{WebFetchTool, WebSearchTool};
 use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
-use crate::config::schema::{ChannelsConfig, ExecToolConfig, WebSearchConfig};
+use crate::config::schema::{ChannelsConfig, ExecToolConfig, McpServerConfig, WebSearchConfig};
 use crate::providers::base::LLMProvider;
 use crate::session::{Session, SessionManager};
 use chrono::Local;
@@ -31,12 +32,21 @@ pub struct AgentLoop {
     context_window_tokens: u32,
     context: ContextBuilder,
     sessions: Mutex<SessionManager>,
-    tools: Arc<ToolRegistry>,
+    /// Base tool registry (built-in tools). MCP tools are added lazily on first use.
+    base_tools: ToolRegistry,
+    /// Combined tool registry after MCP connection (None until first message).
+    tools: Mutex<Option<Arc<ToolRegistry>>>,
     memory: Mutex<MemoryConsolidator>,
     channels_config: ChannelsConfig,
     start_time: Instant,
     last_usage: Mutex<HashMap<String, u64>>,
     running: Mutex<bool>,
+    /// MCP server configurations.
+    mcp_servers: HashMap<String, McpServerConfig>,
+    /// Active MCP sessions (kept alive to maintain connections).
+    mcp_sessions: Mutex<Vec<McpSession>>,
+    /// Whether MCP connection has been attempted.
+    mcp_connected: Mutex<bool>,
 }
 
 impl AgentLoop {
@@ -52,13 +62,14 @@ impl AgentLoop {
         exec_config: ExecToolConfig,
         restrict_to_workspace: bool,
         channels_config: ChannelsConfig,
+        mcp_servers: HashMap<String, McpServerConfig>,
     ) -> anyhow::Result<Self> {
         let model = model.unwrap_or_else(|| provider.get_default_model().to_string());
         let context = ContextBuilder::new(workspace);
         let sessions = Mutex::new(SessionManager::new(workspace)?);
         let memory = Mutex::new(MemoryConsolidator::new(workspace, context_window_tokens));
 
-        let mut tools = ToolRegistry::new();
+        let mut base_tools = ToolRegistry::new();
 
         let allowed_dir = if restrict_to_workspace {
             Some(workspace.to_path_buf())
@@ -66,25 +77,25 @@ impl AgentLoop {
             None
         };
 
-        tools.register(Box::new(ReadFileTool::new(
+        base_tools.register(Box::new(ReadFileTool::new(
             Some(workspace.to_path_buf()),
             allowed_dir.clone(),
         )));
-        tools.register(Box::new(WriteFileTool::new(
+        base_tools.register(Box::new(WriteFileTool::new(
             Some(workspace.to_path_buf()),
             allowed_dir.clone(),
         )));
-        tools.register(Box::new(EditFileTool::new(
+        base_tools.register(Box::new(EditFileTool::new(
             Some(workspace.to_path_buf()),
             allowed_dir.clone(),
         )));
-        tools.register(Box::new(ListDirTool::new(
+        base_tools.register(Box::new(ListDirTool::new(
             Some(workspace.to_path_buf()),
             allowed_dir.clone(),
         )));
 
         if exec_config.enable {
-            tools.register(Box::new(ExecTool::new(
+            base_tools.register(Box::new(ExecTool::new(
                 exec_config.timeout as u64,
                 Some(workspace.display().to_string()),
                 restrict_to_workspace,
@@ -92,7 +103,7 @@ impl AgentLoop {
             )));
         }
 
-        tools.register(Box::new(WebSearchTool::new(
+        base_tools.register(Box::new(WebSearchTool::new(
             &web_search_config.provider,
             web_search_config.api_key.clone(),
             web_search_config.base_url.clone(),
@@ -100,7 +111,7 @@ impl AgentLoop {
             web_proxy.clone(),
         )));
 
-        tools.register(Box::new(WebFetchTool::new(50_000, web_proxy)));
+        base_tools.register(Box::new(WebFetchTool::new(50_000, web_proxy)));
 
         Ok(Self {
             bus,
@@ -111,13 +122,69 @@ impl AgentLoop {
             context_window_tokens,
             context,
             sessions,
-            tools: Arc::new(tools),
+            base_tools,
+            tools: Mutex::new(None),
             memory,
             channels_config,
             start_time: Instant::now(),
             last_usage: Mutex::new(HashMap::new()),
             running: Mutex::new(false),
+            mcp_servers,
+            mcp_sessions: Mutex::new(Vec::new()),
+            mcp_connected: Mutex::new(false),
         })
+    }
+
+    /// Lazily connect to configured MCP servers on first use.
+    ///
+    /// If there are no MCP servers configured this is a no-op.
+    /// On failure the error is logged and processing continues without MCP tools
+    /// (a retry will be attempted on the next message).
+    async fn connect_mcp(&self) {
+        if self.mcp_servers.is_empty() {
+            return;
+        }
+
+        let mut connected = self.mcp_connected.lock().await;
+        if *connected {
+            return;
+        }
+
+        info!("Connecting to {} MCP server(s)...", self.mcp_servers.len());
+
+        // Build a fresh combined registry (clone built-in tools, then add MCP tools)
+        let mut combined = self.base_tools.clone_registry();
+        let sessions = connect_mcp_servers(&self.mcp_servers, &mut combined).await;
+
+        let session_count = sessions.len();
+        *self.mcp_sessions.lock().await = sessions;
+        *self.tools.lock().await = Some(Arc::new(combined));
+        *connected = true;
+
+        info!(
+            "MCP connection complete: {} session(s) established",
+            session_count
+        );
+    }
+
+    /// Get (or build) the active tool registry.
+    async fn get_tools(&self) -> Arc<ToolRegistry> {
+        let guard = self.tools.lock().await;
+        if let Some(ref registry) = *guard {
+            return Arc::clone(registry);
+        }
+        drop(guard);
+        // No MCP configured — wrap base tools in an Arc directly
+        Arc::new(self.base_tools.clone_registry())
+    }
+
+    /// Close all active MCP sessions and reset state.
+    pub async fn close_mcp(&self) {
+        let mut sessions = self.mcp_sessions.lock().await;
+        sessions.clear();
+        *self.mcp_connected.lock().await = false;
+        *self.tools.lock().await = None;
+        info!("MCP sessions closed");
     }
 
     /// Strip <think>...</think> blocks from LLM output.
@@ -162,10 +229,13 @@ impl AgentLoop {
         let mut final_content: Option<String> = None;
         let mut tools_used: Vec<String> = Vec::new();
 
+        // Capture the current tool registry snapshot for this loop invocation
+        let tools = self.get_tools().await;
+
         while iteration < self.max_iterations {
             iteration += 1;
 
-            let tool_defs = self.tools.get_definitions();
+            let tool_defs = tools.get_definitions();
             let response = self
                 .provider
                 .chat_with_retry(
@@ -215,7 +285,7 @@ impl AgentLoop {
                     let args_str = serde_json::to_string(&tool_call.arguments).unwrap_or_default();
                     info!("Tool call: {}({})", tool_call.name, &args_str[..args_str.len().min(200)]);
 
-                    let result = self.tools.execute(&tool_call.name, &tool_call.arguments).await;
+                    let result = tools.execute(&tool_call.name, &tool_call.arguments).await;
                     ContextBuilder::add_tool_result(
                         &mut messages,
                         &tool_call.id,
@@ -404,6 +474,9 @@ impl AgentLoop {
             }
             _ => {}
         }
+
+        // Lazily connect to MCP servers on first message
+        self.connect_mcp().await;
 
         // Consolidate memory if needed
         {

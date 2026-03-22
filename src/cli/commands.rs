@@ -127,6 +127,7 @@ fn run_chat(model_override: Option<String>, session_override: Option<String>) {
             config.tools.exec.clone(),
             config.tools.restrict_to_workspace,
             config.channels.clone(),
+            config.tools.mcp_servers.clone(),
         ) {
             Ok(a) => Arc::new(a),
             Err(e) => {

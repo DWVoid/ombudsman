@@ -105,15 +105,49 @@ impl Default for ExecToolConfig {
     }
 }
 
-/// MCP server configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// MCP server transport type.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum McpTransportType {
+    /// Legacy Server-Sent Events transport (HTTP SSE endpoint).
+    #[serde(rename = "sse")]
+    Sse,
+    /// New MCP Streamable HTTP transport.
+    #[serde(rename = "streamableHttp")]
+    StreamableHttp,
+}
+
+/// MCP server configuration (HTTP transports only — stdio is not supported).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct McpServerConfig {
-    pub command: String,
-    pub args: Vec<String>,
-    pub env: Option<HashMap<String, String>>,
-    pub url: Option<String>,
-    pub allowed_tools: Option<Vec<String>>,
+    /// Transport type; auto-detected from URL if omitted.
+    /// Accepts "sse" or "streamableHttp".
+    /// stdio is not supported.
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub transport_type: Option<McpTransportType>,
+    /// HTTP/SSE endpoint URL.
+    pub url: String,
+    /// Custom HTTP headers to include with every request.
+    pub headers: HashMap<String, String>,
+    /// Seconds before a tool call is cancelled (default: 30).
+    pub tool_timeout: u32,
+    /// Which tools to register.
+    /// Accepts raw MCP tool names or wrapped `mcp_<server>_<tool>` names.
+    /// `["*"]` (default) = all tools; `[]` = no tools.
+    pub enabled_tools: Vec<String>,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            transport_type: None,
+            url: String::new(),
+            headers: HashMap::new(),
+            tool_timeout: 30,
+            enabled_tools: vec!["*".to_string()],
+        }
+    }
 }
 
 /// Tools configuration.
@@ -124,7 +158,8 @@ pub struct ToolsConfig {
     pub exec: ExecToolConfig,
     pub web_proxy: Option<String>,
     pub restrict_to_workspace: bool,
-    pub mcp_servers: Option<HashMap<String, McpServerConfig>>,
+    /// MCP servers to connect to. Keys are server names.
+    pub mcp_servers: HashMap<String, McpServerConfig>,
 }
 
 /// Channels configuration.

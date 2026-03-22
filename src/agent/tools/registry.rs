@@ -17,6 +17,15 @@ impl ToolRegistry {
         }
     }
 
+    /// Clone this registry into a new, independent registry.
+    pub fn clone_registry(&self) -> ToolRegistry {
+        let mut new_reg = ToolRegistry::new();
+        for (name, tool) in &self.tools {
+            new_reg.tools.insert(name.clone(), tool.clone_box());
+        }
+        new_reg
+    }
+
     /// Register a tool.
     pub fn register(&mut self, tool: Box<dyn Tool>) {
         self.tools.insert(tool.name().to_string(), tool);
@@ -25,6 +34,13 @@ impl ToolRegistry {
     /// Get a tool by name.
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools.get(name).map(|t| t.as_ref())
+    }
+
+    /// Get all registered tool names, sorted.
+    pub fn tool_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.tools.keys().cloned().collect();
+        names.sort();
+        names
     }
 
     /// Get all tool definitions in OpenAI function calling format.
