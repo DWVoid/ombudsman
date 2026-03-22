@@ -1,0 +1,24 @@
+[package]
+name = "ombudsman-gui"
+version.workspace = true
+edition.workspace = true
+description = "Graphical client for ombudsman — connects to ombudsman-server via WebSocket"
+license = "MIT"
+
+[[bin]]
+name = "ombudsman-gui"
+path = "src/main.rs"
+
+[dependencies]
+ombudsman-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rmp-serde = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+iced = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures = { workspace = true }
+dirs = { workspace = true }
