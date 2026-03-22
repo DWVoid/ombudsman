@@ -4,10 +4,15 @@ use crate::agent::AgentLoop;
 use crate::bus::MessageBus;
 use crate::config::{load_config, save_config};
 use crate::config::paths::{expand_path, get_config_path, get_data_dir};
-use crate::config::schema::Config;
-use crate::providers::base::GenerationSettings;
+use crate::config::schema::{Config, ProviderConfig};
+use crate::providers::anthropic::AnthropicProvider;
+use crate::providers::azure::AzureOpenAIProvider;
+use crate::providers::base::{GenerationSettings, LLMProvider};
 use crate::providers::openai::OpenAIProvider;
-use crate::providers::registry::{detect_provider_from_model, get_provider_config, KNOWN_PROVIDERS};
+use crate::providers::registry::{
+    find_by_model, find_by_name, find_gateway, get_provider_config, resolve_model_name,
+    KNOWN_PROVIDERS,
+};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use rustyline::error::ReadlineError;
@@ -104,7 +109,7 @@ fn run_chat(model_override: Option<String>, session_override: Option<String>) {
         let model = model_override.unwrap_or_else(|| config.agents.defaults.model.clone());
 
         // Build provider
-        let provider = match build_provider(&model, &config) {
+        let provider: Arc<dyn LLMProvider> = match build_provider(&model, &config) {
             Some(p) => p,
             None => {
                 eprintln!("{}", "No API key found for the selected model.".red());
@@ -117,7 +122,7 @@ fn run_chat(model_override: Option<String>, session_override: Option<String>) {
 
         let agent = match AgentLoop::new(
             bus.clone(),
-            Arc::from(provider),
+            provider,
             &workspace,
             Some(model.clone()),
             config.agents.defaults.max_tool_iterations,
@@ -322,48 +327,130 @@ fn show_config() {
     println!("Max tool iterations: {}", config.agents.defaults.max_tool_iterations);
     println!();
     println!("Providers configured:");
-    let providers = &config.providers;
-    macro_rules! show_provider {
-        ($name:expr, $config:expr) => {
-            if !$config.api_key.is_empty() {
+    let p = &config.providers;
+    macro_rules! show_p {
+        ($name:expr, $cfg:expr) => {
+            if !$cfg.api_key.is_empty() || $cfg.api_base.is_some() {
                 println!("  ✓ {}", $name);
             }
         };
     }
-    show_provider!("openai", providers.openai);
-    show_provider!("anthropic", providers.anthropic);
-    show_provider!("openrouter", providers.openrouter);
-    show_provider!("deepseek", providers.deepseek);
-    show_provider!("groq", providers.groq);
-    show_provider!("gemini", providers.gemini);
-    show_provider!("moonshot", providers.moonshot);
+    show_p!("openai", p.openai);
+    show_p!("anthropic", p.anthropic);
+    show_p!("openrouter", p.openrouter);
+    show_p!("deepseek", p.deepseek);
+    show_p!("groq", p.groq);
+    show_p!("gemini", p.gemini);
+    show_p!("moonshot", p.moonshot);
+    show_p!("minimax", p.minimax);
+    show_p!("azure_openai", p.azure_openai);
+    show_p!("aihubmix", p.aihubmix);
+    show_p!("siliconflow", p.siliconflow);
+    show_p!("volcengine", p.volcengine);
+    show_p!("custom", p.custom);
+    show_p!("ollama", p.ollama);
+    show_p!("vllm", p.vllm);
 }
 
-/// Build an LLM provider from config and model name.
-fn build_provider(model: &str, config: &Config) -> Option<OpenAIProvider> {
-    // Try auto-detect from model name
-    let spec = detect_provider_from_model(model);
-    let provider_name = spec.map(|s| s.name).unwrap_or("openai");
+// ---------------------------------------------------------------------------
+// Provider construction
+// ---------------------------------------------------------------------------
 
-    let provider_cfg = get_provider_config(provider_name, &config.providers);
-    let api_key = if !provider_cfg.api_key.is_empty() {
-        provider_cfg.api_key.clone()
-    } else {
-        // Check environment variables
-        let env_key = spec.map(|s| s.env_key).unwrap_or("OPENAI_API_KEY");
-        std::env::var(env_key).unwrap_or_default()
-    };
+/// Resolve which provider spec and config to use for a given model + config.
+///
+/// Priority (matches the reference nanobot):
+/// 1. Explicit `provider` field in `agents.defaults` (when not "auto").
+/// 2. Explicit `provider/model` prefix in the model name.
+/// 3. Keyword match against model name.
+/// 4. Gateway auto-detection via `api_key` prefix / `api_base` URL keyword.
+/// 5. Fallback to the first configured provider that has an api_key.
+fn resolve_provider<'a>(
+    model: &str,
+    config: &'a Config,
+) -> Option<(&'static str, &'a ProviderConfig, String)> {
+    let providers = &config.providers;
+    let forced = config.agents.defaults.provider.as_str();
 
-    if api_key.is_empty() {
-        return None;
+    let (clean_model, _prefix_provider) = resolve_model_name(model);
+
+    // 1. Explicit provider override
+    if forced != "auto" {
+        let spec = find_by_name(forced)?;
+        let cfg = get_provider_config(spec.name, providers);
+        let key = resolve_api_key(cfg, spec.env_key);
+        // Local providers don't need a key
+        if !key.is_empty() || spec.is_local {
+            return Some((spec.name, cfg, clean_model));
+        }
     }
 
-    let api_base = provider_cfg.api_base.clone()
-        .or_else(|| spec.map(|s| s.api_base.to_string()))
-        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+    // 2 + 3. Provider-prefix or keyword match
+    if let Some(spec) = find_by_model(model) {
+        let cfg = get_provider_config(spec.name, providers);
+        let key = resolve_api_key(cfg, spec.env_key);
+        if !key.is_empty() || spec.is_local {
+            return Some((spec.name, cfg, clean_model));
+        }
+    }
 
-    // Strip provider prefix from model name for the API call
-    let (clean_model, _) = crate::providers::registry::resolve_model_name(model);
+    // 4. Gateway auto-detection by api_key prefix / api_base keyword
+    //    (scan all configured providers that have a key or base set)
+    for spec in KNOWN_PROVIDERS {
+        let cfg = get_provider_config(spec.name, providers);
+        let key = resolve_api_key(cfg, spec.env_key);
+        let base = cfg.api_base.as_deref().unwrap_or("");
+        if find_gateway(&key, base).map(|s| s.name) == Some(spec.name) {
+            if !key.is_empty() {
+                return Some((spec.name, cfg, clean_model.clone()));
+            }
+        }
+    }
+
+    // 5. Fallback: first provider with a key
+    for spec in KNOWN_PROVIDERS {
+        if spec.is_local {
+            continue;
+        }
+        let cfg = get_provider_config(spec.name, providers);
+        let key = resolve_api_key(cfg, spec.env_key);
+        if !key.is_empty() {
+            return Some((spec.name, cfg, clean_model.clone()));
+        }
+    }
+
+    None
+}
+
+/// Return the API key from `cfg`, falling back to the named env var.
+fn resolve_api_key(cfg: &ProviderConfig, env_key: &str) -> String {
+    if !cfg.api_key.is_empty() {
+        return cfg.api_key.clone();
+    }
+    if !env_key.is_empty() {
+        return std::env::var(env_key).unwrap_or_default();
+    }
+    String::new()
+}
+
+/// Build an `Arc<dyn LLMProvider>` from config and model name.
+///
+/// Returns `None` when no API key is available for the resolved provider.
+fn build_provider(model: &str, config: &Config) -> Option<Arc<dyn LLMProvider>> {
+    let (provider_name, provider_cfg, clean_model) = resolve_provider(model, config)?;
+
+    let api_key = resolve_api_key(provider_cfg, find_by_name(provider_name)
+        .map(|s| s.env_key)
+        .unwrap_or(""));
+
+    let api_base = provider_cfg
+        .api_base
+        .clone()
+        .or_else(|| {
+            find_by_name(provider_name)
+                .map(|s| s.api_base.to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
 
     let settings = GenerationSettings {
         temperature: config.agents.defaults.temperature,
@@ -371,13 +458,46 @@ fn build_provider(model: &str, config: &Config) -> Option<OpenAIProvider> {
         reasoning_effort: config.agents.defaults.reasoning_effort.clone(),
     };
 
-    Some(OpenAIProvider::new(
-        &api_key,
-        &api_base,
-        &clean_model,
-        provider_cfg.extra_headers.clone(),
-        Some(settings),
-    ))
+    let extra_headers = provider_cfg.extra_headers.clone();
+
+    let provider: Arc<dyn LLMProvider> = match provider_name {
+        "anthropic" => Arc::new(AnthropicProvider::new(
+            &api_key,
+            Some(&api_base),
+            &clean_model,
+            extra_headers,
+            Some(settings),
+        )),
+        "azure_openai" => {
+            if api_base.is_empty() || api_base == "https://api.openai.com/v1" {
+                // No api_base configured for Azure → fall through to OpenAI
+                Arc::new(OpenAIProvider::new(
+                    &api_key,
+                    &api_base,
+                    &clean_model,
+                    extra_headers,
+                    Some(settings),
+                ))
+            } else {
+                Arc::new(AzureOpenAIProvider::new(
+                    &api_key,
+                    &api_base,
+                    &clean_model,
+                    extra_headers,
+                    Some(settings),
+                ))
+            }
+        }
+        _ => Arc::new(OpenAIProvider::new(
+            &api_key,
+            &api_base,
+            &clean_model,
+            extra_headers,
+            Some(settings),
+        )),
+    };
+
+    Some(provider)
 }
 
 /// Ensure workspace template files exist.

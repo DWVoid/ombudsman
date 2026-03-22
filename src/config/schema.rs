@@ -52,16 +52,35 @@ pub struct ProviderConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ProvidersConfig {
+    /// OpenAI — api.openai.com
     pub openai: ProviderConfig,
+    /// Anthropic — api.anthropic.com (native Messages API)
     pub anthropic: ProviderConfig,
+    /// OpenRouter — openrouter.ai (gateway; routes any model)
     pub openrouter: ProviderConfig,
+    /// DeepSeek — api.deepseek.com
     pub deepseek: ProviderConfig,
+    /// Groq — api.groq.com
     pub groq: ProviderConfig,
+    /// Google Gemini — via OpenAI-compat endpoint
     pub gemini: ProviderConfig,
+    /// Moonshot / Kimi — api.moonshot.ai
     pub moonshot: ProviderConfig,
+    /// MiniMax — api.minimax.io
+    pub minimax: ProviderConfig,
+    /// Ollama — local models via OpenAI-compat endpoint
     pub ollama: ProviderConfig,
+    /// vLLM / any OpenAI-compatible local server
     pub vllm: ProviderConfig,
+    /// Azure OpenAI — requires api_base; uses `api-key` header
     pub azure_openai: ProviderConfig,
+    /// AiHubMix — aihubmix.com OpenAI-compatible gateway
+    pub aihubmix: ProviderConfig,
+    /// SiliconFlow — api.siliconflow.cn OpenAI-compatible gateway
+    pub siliconflow: ProviderConfig,
+    /// VolcEngine (火山引擎) — ark.cn-beijing.volces.com
+    pub volcengine: ProviderConfig,
+    /// Custom — any OpenAI-compatible endpoint (fallback)
     pub custom: ProviderConfig,
 }
 
