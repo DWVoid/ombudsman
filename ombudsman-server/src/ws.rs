@@ -14,19 +14,20 @@ use axum::{
     routing::get,
 };
 use futures::{SinkExt, StreamExt};
-use ombudsman_core::{
-    builder::build_agent_loop,
-    bus::{InboundMessage, MessageBus},
-    config::load_config,
-    protocol::{ClientMsg, ServerMsg, decode_client_msg, encode_server_msg},
+use ombudsman_core::protocol::{
+    ClientMsg, ServerMsg, SessionInfo, decode_client_msg, encode_server_msg,
 };
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
+use crate::builder::build_agent_loop;
+use crate::bus::{InboundMessage, MessageBus};
+use crate::config::load_config;
+
 /// Shared server state accessible from every WS handler.
 #[derive(Clone)]
 struct AppState {
-    config: Arc<ombudsman_core::config::schema::Config>,
+    config: Arc<crate::config::schema::Config>,
     model_override: Option<String>,
 }
 
@@ -114,8 +115,6 @@ async fn handle_session(socket: WebSocket, state: AppState) {
 
             match msg {
                 Ok(Some(out)) => {
-                    // Outbound bus messages are usually subagent completions
-                    // re-broadcast to the user.
                     let server_msg = ServerMsg::Response {
                         content: out.content,
                         media: out.media,
@@ -187,7 +186,7 @@ async fn handle_session(socket: WebSocket, state: AppState) {
         let bytes = match frame {
             Message::Binary(b) => b,
             Message::Close(_) => break,
-            _ => continue, // ignore text / ping / pong
+            _ => continue,
         };
 
         let client_msg = match decode_client_msg(&bytes) {
@@ -204,8 +203,98 @@ async fn handle_session(socket: WebSocket, state: AppState) {
             }
         };
 
-        // Map ClientMsg → InboundMessage and dispatch.
-        let (session_key, inbound) = match client_msg {
+        match client_msg {
+            // ----------------------------------------------------------------
+            // SessionList: enumerate all sessions from workspace
+            // ----------------------------------------------------------------
+            ClientMsg::SessionList => {
+                let config = Arc::clone(&state.config);
+                let tx = server_tx.clone();
+                tokio::spawn(async move {
+                    let workspace =
+                        crate::config::paths::expand_path(&config.agents.defaults.workspace);
+                    let sessions_dir = workspace.join("sessions");
+                    let mut sessions: Vec<SessionInfo> = Vec::new();
+                    if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                                let key = path
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("")
+                                    .replace('_', ":");
+                                let meta = std::fs::metadata(&path).ok();
+                                let updated_at = meta
+                                    .and_then(|m| m.modified().ok())
+                                    .and_then(|t| {
+                                        t.duration_since(std::time::UNIX_EPOCH).ok()
+                                    })
+                                    .map(|d| {
+                                        chrono::DateTime::<chrono::Local>::from(
+                                            std::time::UNIX_EPOCH
+                                                + std::time::Duration::from_secs(d.as_secs()),
+                                        )
+                                        .to_rfc3339()
+                                    })
+                                    .unwrap_or_default();
+                                // Count messages by counting non-empty, non-metadata lines
+                                let message_count = std::fs::read_to_string(&path)
+                                    .unwrap_or_default()
+                                    .lines()
+                                    .filter(|l| {
+                                        !l.trim().is_empty()
+                                            && !l.contains(r#""_type":"metadata""#)
+                                    })
+                                    .count();
+                                sessions.push(SessionInfo {
+                                    key,
+                                    message_count,
+                                    updated_at,
+                                });
+                            }
+                        }
+                    }
+                    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                    let msg = ServerMsg::SessionList { sessions };
+                    if let Ok(b) = encode_server_msg(&msg) {
+                        let _ = tx.send(b).await;
+                    }
+                });
+            }
+
+            // ----------------------------------------------------------------
+            // Stop: signal the agent to stop the current task
+            // ----------------------------------------------------------------
+            ClientMsg::Stop { session_key } => {
+                // Currently stop is a command the agent processes via "/stop"
+                let mut m = InboundMessage::new("ws", "user", "ws", "/stop");
+                m.session_key_override = Some(session_key.clone());
+                let agent_clone = Arc::clone(&agent);
+                let tx = server_tx.clone();
+                tokio::spawn(async move {
+                    if let Some(response) = agent_clone.process_message(&m, None).await {
+                        let msg = ServerMsg::Stopped {
+                            session_key: session_key.clone(),
+                        };
+                        if let Ok(b) = encode_server_msg(&msg) {
+                            let _ = tx.send(b).await;
+                        }
+                        // Also send the agent's text response
+                        let resp = ServerMsg::Response {
+                            content: response.content,
+                            media: response.media,
+                        };
+                        if let Ok(b) = encode_server_msg(&resp) {
+                            let _ = tx.send(b).await;
+                        }
+                    }
+                });
+            }
+
+            // ----------------------------------------------------------------
+            // Chat / Command: dispatch to agent
+            // ----------------------------------------------------------------
             ClientMsg::Chat {
                 session_key,
                 content,
@@ -214,57 +303,95 @@ async fn handle_session(socket: WebSocket, state: AppState) {
                 let mut m = InboundMessage::new("ws", "user", "ws", &content);
                 m.media = media;
                 m.session_key_override = Some(session_key.clone());
-                (session_key, m)
+
+                // Ack immediately.
+                let ack = ServerMsg::Ack {
+                    session_key: session_key.clone(),
+                };
+                if let Ok(b) = encode_server_msg(&ack) {
+                    let _ = server_tx.send(b).await;
+                }
+
+                let agent_clone = Arc::clone(&agent);
+                let tx_clone = server_tx.clone();
+                tokio::spawn(async move {
+                    let on_progress: Arc<dyn Fn(String, bool) + Send + Sync> = {
+                        let tx = tx_clone.clone();
+                        Arc::new(move |content: String, is_tool_hint: bool| {
+                            let msg = ServerMsg::Progress {
+                                content,
+                                is_tool_hint,
+                            };
+                            if let Ok(b) = encode_server_msg(&msg) {
+                                let inner_tx = tx.clone();
+                                tokio::spawn(async move {
+                                    let _ = inner_tx.send(b).await;
+                                });
+                            }
+                        })
+                    };
+
+                    if let Some(response) =
+                        agent_clone.process_message(&m, Some(on_progress)).await
+                    {
+                        let msg = ServerMsg::Response {
+                            content: response.content,
+                            media: response.media,
+                        };
+                        if let Ok(b) = encode_server_msg(&msg) {
+                            let _ = tx_clone.send(b).await;
+                        }
+                    }
+                });
             }
+
             ClientMsg::Command {
                 session_key,
                 command,
             } => {
                 let mut m = InboundMessage::new("ws", "user", "ws", &command);
                 m.session_key_override = Some(session_key.clone());
-                (session_key, m)
-            }
-        };
 
-        // Ack immediately.
-        let ack = ServerMsg::Ack {
-            session_key: session_key.clone(),
-        };
-        if let Ok(b) = encode_server_msg(&ack) {
-            let _ = server_tx.send(b).await;
-        }
-
-        // Run the agent, streaming progress events.
-        let agent_clone = Arc::clone(&agent);
-        let tx_clone = server_tx.clone();
-        tokio::spawn(async move {
-            let on_progress: Arc<dyn Fn(String, bool) + Send + Sync> = {
-                let tx = tx_clone.clone();
-                Arc::new(move |content: String, is_tool_hint: bool| {
-                    let msg = ServerMsg::Progress {
-                        content,
-                        is_tool_hint,
-                    };
-                    if let Ok(b) = encode_server_msg(&msg) {
-                        let inner_tx = tx.clone();
-                        tokio::spawn(async move {
-                            let _ = inner_tx.send(b).await;
-                        });
-                    }
-                })
-            };
-
-            if let Some(response) = agent_clone.process_message(&inbound, Some(on_progress)).await
-            {
-                let msg = ServerMsg::Response {
-                    content: response.content,
-                    media: response.media,
+                // Ack immediately.
+                let ack = ServerMsg::Ack {
+                    session_key: session_key.clone(),
                 };
-                if let Ok(b) = encode_server_msg(&msg) {
-                    let _ = tx_clone.send(b).await;
+                if let Ok(b) = encode_server_msg(&ack) {
+                    let _ = server_tx.send(b).await;
                 }
+
+                let agent_clone = Arc::clone(&agent);
+                let tx_clone = server_tx.clone();
+                let session_key_clone = session_key.clone();
+                tokio::spawn(async move {
+                    if let Some(response) = agent_clone.process_message(&m, None).await {
+                        // Detect /status response specially
+                        let server_msg = if command.trim().to_lowercase() == "/status" {
+                            ServerMsg::StatusResponse {
+                                content: response.content,
+                            }
+                        } else {
+                            ServerMsg::Response {
+                                content: response.content,
+                                media: response.media,
+                            }
+                        };
+                        if let Ok(b) = encode_server_msg(&server_msg) {
+                            let _ = tx_clone.send(b).await;
+                        }
+                        // If it was a /stop command, also send Stopped
+                        if command.trim().to_lowercase() == "/stop" {
+                            let stopped = ServerMsg::Stopped {
+                                session_key: session_key_clone,
+                            };
+                            if let Ok(b) = encode_server_msg(&stopped) {
+                                let _ = tx_clone.send(b).await;
+                            }
+                        }
+                    }
+                });
             }
-        });
+        }
     }
 
     // Clean up background tasks.

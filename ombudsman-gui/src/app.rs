@@ -282,6 +282,23 @@ impl App {
                 ServerMsg::Ack { .. } => {
                     // Acknowledged — nothing to show.
                 }
+                ServerMsg::SessionList { sessions } => {
+                    let lines: Vec<String> = sessions
+                        .iter()
+                        .map(|s| format!("{} ({} messages)", s.key, s.message_count))
+                        .collect();
+                    self.state.chat.push_message(ChatMessage::system(
+                        format!("Sessions:\n{}", lines.join("\n")),
+                    ));
+                }
+                ServerMsg::Stopped { .. } => {
+                    self.state.chat.is_loading = false;
+                    self.state.chat.progress_text = None;
+                    self.state.chat.push_message(ChatMessage::system("Task stopped."));
+                }
+                ServerMsg::StatusResponse { content } => {
+                    self.state.chat.push_message(ChatMessage::system(content));
+                }
             },
         }
     }

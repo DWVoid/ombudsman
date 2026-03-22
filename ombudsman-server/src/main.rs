@@ -1,10 +1,14 @@
-//! ombudsman-server: WebSocket agent server + legacy CLI.
+//! ombudsman-server: WebSocket agent server.
 //!
 //! # Subcommands
 //! * `serve [--host 0.0.0.0] [--port 7878] [--model ...]` — start the WebSocket server
-//! * `chat  [--model ...]  [--session ...]`               — interactive CLI (legacy mode)
 
-mod cli;
+pub mod agent;
+pub mod builder;
+pub mod bus;
+pub mod config;
+pub mod providers;
+pub mod session;
 mod ws;
 
 fn main() {
@@ -14,22 +18,19 @@ fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("ombudsman_server=info".parse().unwrap())
-                .add_directive("ombudsman_core=info".parse().unwrap()),
+                .add_directive("ombudsman_server=info".parse().unwrap()),
         )
         .with_target(false)
         .init();
 
     let cli = Cli::parse();
-    match cli.command.unwrap_or(Commands::Chat {
+    match cli.command.unwrap_or(Commands::Serve {
+        host: "127.0.0.1".to_string(),
+        port: 7878,
         model: None,
-        session: None,
     }) {
         Commands::Serve { host, port, model } => {
             ws::run_server(host, port, model);
-        }
-        Commands::Chat { model, session } => {
-            cli::run_chat(model, session);
         }
     }
 }
@@ -38,7 +39,7 @@ fn main() {
 #[command(
     name = "ombudsman-server",
     version = env!("CARGO_PKG_VERSION"),
-    about = "🐈 ombudsman — AI assistant server",
+    about = "🐈 ombudsman — AI assistant WebSocket server",
 )]
 struct Cli {
     #[command(subcommand)]
@@ -58,15 +59,5 @@ enum Commands {
         /// Model to use (overrides config).
         #[arg(short, long)]
         model: Option<String>,
-    },
-    /// Interactive CLI session (legacy mode, no server needed).
-    #[command(alias = "agent")]
-    Chat {
-        /// Model to use (overrides config).
-        #[arg(short, long)]
-        model: Option<String>,
-        /// Session key.
-        #[arg(short, long)]
-        session: Option<String>,
     },
 }

@@ -1,7 +1,2 @@
-pub mod agent;
-pub mod builder;
-pub mod bus;
-pub mod config;
+//! ombudsman-core: shared wire protocol for ombudsman clients and server.
 pub mod protocol;
-pub mod providers;
-pub mod session;

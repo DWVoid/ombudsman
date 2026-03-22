@@ -4,6 +4,17 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Brief information about a session returned by `ServerMsg::SessionList`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInfo {
+    /// Session key (e.g. "cli:default").
+    pub key: String,
+    /// Number of messages in the session.
+    pub message_count: usize,
+    /// RFC-3339 timestamp of last update.
+    pub updated_at: String,
+}
+
 /// Messages sent from a client to the server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -23,6 +34,10 @@ pub enum ClientMsg {
         session_key: String,
         command: String,
     },
+    /// Request the list of all sessions on the server.
+    SessionList,
+    /// Request to stop the currently running agent task for a session.
+    Stop { session_key: String },
 }
 
 /// Messages sent from the server to a client.
@@ -44,6 +59,12 @@ pub enum ServerMsg {
     Error { message: String },
     /// Acknowledgement: the server accepted the request.
     Ack { session_key: String },
+    /// Response to a `ClientMsg::SessionList` request.
+    SessionList { sessions: Vec<SessionInfo> },
+    /// The running task was stopped (or there was nothing to stop).
+    Stopped { session_key: String },
+    /// Status information (response to `/status` command).
+    StatusResponse { content: String },
 }
 
 /// Encode a `ServerMsg` to MessagePack bytes.

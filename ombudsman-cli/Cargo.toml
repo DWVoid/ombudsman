@@ -1,0 +1,35 @@
+[package]
+name = "ombudsman-cli"
+version.workspace = true
+edition.workspace = true
+description = "Interactive command-line client for ombudsman — connects to ombudsman-server via WebSocket"
+license = "MIT"
+
+[[bin]]
+name = "ombudsman-cli"
+path = "src/main.rs"
+
+[dependencies]
+ombudsman-core = { workspace = true }
+# Async runtime
+tokio = { workspace = true }
+# Serialization
+serde = { workspace = true }
+rmp-serde = { workspace = true }
+# Error handling
+anyhow = { workspace = true }
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# CLI parsing
+clap = { workspace = true }
+# Interactive readline
+rustyline = { workspace = true }
+# Colored terminal output
+colored = { workspace = true }
+# Futures utilities
+futures = { workspace = true }
+# Directories
+dirs = { workspace = true }
+# WebSocket client
+tokio-tungstenite = { workspace = true }

@@ -3,6 +3,7 @@ members = [
     "ombudsman-core",
     "ombudsman-server",
     "ombudsman-gui",
+    "ombudsman-cli",
 ]
 resolver = "2"
 
