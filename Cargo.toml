@@ -1,0 +1,63 @@
+[package]
+name = "ombudsman"
+version = "0.1.0"
+edition = "2021"
+description = "A lightweight personal AI assistant — Rust port of nanobot"
+license = "MIT"
+
+[[bin]]
+name = "ombudsman"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+# CLI
+clap = { version = "4", features = ["derive"] }
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# Async traits
+async-trait = "0.1"
+# Error handling
+anyhow = "1"
+thiserror = "2"
+# Directories (home dir, etc.)
+dirs = "5"
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+# Random IDs
+rand = "0.8"
+# Base64
+base64 = "0.22"
+# Regex
+regex = "1"
+# Futures utilities
+futures = "0.3"
+# UUID
+uuid = { version = "1", features = ["v4"] }
+# Interactive CLI (rustyline for readline-like editing)
+rustyline = "14"
+# Colored terminal output
+colored = "2"
+# HTML parsing for web fetch
+scraper = "0.21"
+# URL parsing
+url = "2"
+# MIME type detection
+mime_guess = "2"
+# Once cell for lazy statics
+once_cell = "1"
+# tempfile for tests
+tempfile = "3"
+html-escape = "0.2.13"
+urlencoding = "2.1.3"
+
+[lib]
+name = "ombudsman"
+path = "src/lib.rs"
